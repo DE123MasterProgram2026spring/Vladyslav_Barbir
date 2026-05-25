@@ -1,0 +1,480 @@
+---
+title: "Лабораторна робота №3: Робота зі структурованими даними, перетворення форматів та віконні операції"
+subtitle: "Інженерія даних | КрНУ ім. М. Остроградського"
+author: "Барбір Владислав KI-25-1м"
+date: last-modified
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    sidebar: left
+    collapse-level: 2
+    code-fold: true
+    code-overflow: wrap
+    page-layout: full
+    include-in-footer:
+      text: |
+        <hr>
+        <footer style="text-align: center; font-size: 0.9em; color: #666;">
+          <p>Виконав: <strong>Сохін Дмитро</strong> | Група: <strong>KI-25-1м</strong> | Викладач: Сидоренко В.М.</p>
+          <p>Кременчуцький національний університет імені Михайла Остроградського &copy; 2025</p>
+        </footer>
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+### Мета роботи
+
+Освоїти сучасні методи обробки неструктурованих та напівструктурованих даних (JSON), навчитися перетворювати формати таблиць (широкий ↔ довгий) за допомогою `tidyr`, а також застосовувати віконні функції для аналізу даних у контексті груп. Ці навички є ключовими для підготовки даних у складних ETL-процесах.
+
+------------------------------------------------------------------------
+
+### Хід роботи
+
+```{r}
+#| label: setup
+#| include: false
+
+Sys.setlocale("LC_ALL", "en_US.UTF-8")
+
+library(jsonlite)
+library(readxl)
+library(vroom)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(knitr)
+library(writexl)
+library(lubridate)
+```
+
+Виконати індивідуальне завдання варіанту 3:
+
+**Тема:** Аналіз даних про відгуки клієнтів у мультиканальному сервісі
+
+0.  **Згенерувати датасети:**
+    - `reviews.json` — відгуки клієнтів з вкладеною структурою `channels` та `tags`
+    - `monthly_activity.xlsx` — аркуші `jan`, `feb`, `mar` з активністю клієнтів
+    - `client_profiles.csv` — базова інформація про клієнтів
+1.  **Етап 1: Робота з JSON**
+    - Завантажте `reviews.json` через `jsonlite::read_json()`
+    - Перетворіть у `tibble`
+    - Використовуючи `hoist()` та `unnest_longer()`, виділіть `client_id`, `review_date`, `rating` та для кожного каналу — `channel_name`, `interaction_count`
+    - Залиште лише відгуки з рейтингом ≥ 4
+2.  **Етап 2: Перетворення форматів**
+    - Завантажте всі аркуші з `monthly_activity.xlsx`
+    - Об'єднайте у `activity_long`, додавши стовпець `month`
+    - Завантажте `client_profiles.csv` через `vroom()`
+3.  **Етап 3: Об'єднання та віконні операції**
+    - Об'єднайте `reviews` + `activity_long` за `client_id` та `month`
+    - Додайте `client_profiles` через `left_join`
+    - Виконайте ранжування, зсув та накопичення
+4.  **Етап 4: Аналіз**
+    - `semi_join` — клієнти з відгуками кожного місяця
+    - `anti_join` — Premium-клієнти без відгуків у березні
+    - Аналіз кореляції кількості каналів з рейтингом
+
+------------------------------------------------------------------------
+
+#### 0. Генерація даних
+
+Створимо синтетичні датасети у папці `data/`.
+
+```{r}
+#| label: generate-data
+
+set.seed(42)
+
+dir.create("data", showWarnings = FALSE)
+
+n_clients <- 40
+
+client_profiles <- tibble(
+  client_id         = sprintf("C%04d", 1:n_clients),
+  region            = sample(c("Північ", "Південь", "Захід", "Схід"), n_clients, replace = TRUE),
+  registration_date = sample(seq.Date(as.Date("2022-01-01"), as.Date("2023-06-01"), by = "day"), n_clients),
+  plan_type         = sample(c("Basic", "Premium"), n_clients, replace = TRUE, prob = c(0.6, 0.4))
+)
+
+channels_pool <- c("mobile_app", "website", "call_center")
+tags_pool     <- c("fast_response", "friendly_staff", "long_wait", "resolved_quickly", "poor_service")
+
+make_review <- function(client_id, review_date, rating) {
+  n_ch <- sample(1:3, 1)
+  channels <- lapply(sample(channels_pool, n_ch), function(ch) {
+    list(
+      name              = ch,
+      interaction_count = sample(1:15, 1),
+      last_used         = format(as.Date(review_date) - sample(1:10, 1))
+    )
+  })
+  list(
+    client_id   = client_id,
+    review_date = review_date,
+    rating      = rating,
+    channels    = channels,
+    tags        = sample(tags_pool, sample(1:3, 1))
+  )
+}
+
+months_dates <- list(
+  jan = "2024-01-15",
+  feb = "2024-02-14",
+  mar = "2024-03-20"
+)
+
+reviews_list <- c(
+  mapply(make_review,
+    client_id   = client_profiles$client_id,
+    review_date = months_dates$jan,
+    rating      = sample(1:5, n_clients, replace = TRUE, prob = c(0.05,0.1,0.2,0.35,0.3)),
+    SIMPLIFY    = FALSE
+  ),
+  mapply(make_review,
+    client_id   = sample(client_profiles$client_id, 30),
+    review_date = months_dates$feb,
+    rating      = sample(1:5, 30, replace = TRUE, prob = c(0.05,0.1,0.2,0.35,0.3)),
+    SIMPLIFY    = FALSE
+  ),
+  mapply(make_review,
+    client_id   = sample(client_profiles$client_id, 25),
+    review_date = months_dates$mar,
+    rating      = sample(1:5, 25, replace = TRUE, prob = c(0.05,0.1,0.2,0.35,0.3)),
+    SIMPLIFY    = FALSE
+  )
+)
+
+write_json(reviews_list, "data/reviews.json", pretty = TRUE, auto_unbox = TRUE)
+
+make_activity <- function(ids) {
+  tibble(
+    client_id       = ids,
+    total_sessions  = sample(5:120, length(ids), replace = TRUE),
+    support_tickets = sample(0:10,  length(ids), replace = TRUE)
+  )
+}
+
+write_xlsx(
+  list(
+    jan = make_activity(client_profiles$client_id),
+    feb = make_activity(client_profiles$client_id),
+    mar = make_activity(client_profiles$client_id)
+  ),
+  "data/monthly_activity.xlsx"
+)
+
+write.csv(client_profiles, "data/client_profiles.csv", row.names = FALSE)
+```
+
+Дані збережено:
+
+- `data/reviews.json` (`r length(reviews_list)` відгуків за 3 місяці)
+- `data/monthly_activity.xlsx` (аркуші: `jan`, `feb`, `mar`, по `r n_clients` рядків)
+- `data/client_profiles.csv` (`r n_clients` клієнтів)
+
+------------------------------------------------------------------------
+
+#### Етап 1: Робота з JSON
+
+##### 1.1 Завантаження та перетворення у tibble
+
+```{r}
+#| label: load-json
+
+raw_json <- read_json("data/reviews.json")
+
+reviews_raw <- tibble(data = raw_json)
+
+reviews_raw %>% head(3) %>% kable(caption = "Сирі JSON-дані у tibble (перші 3 записи)")
+```
+
+##### 1.2 Розгортання: `hoist()` + `unnest_longer()`
+
+Спочатку витягуємо плоскі поля через `hoist()`, потім розгортаємо вкладений масив `channels` через `unnest_longer()`:
+
+```{r}
+#| label: parse-json
+
+reviews_channels <- reviews_raw %>%
+  hoist(data,
+    client_id   = "client_id",
+    review_date = "review_date",
+    rating      = "rating",
+    channels    = "channels"
+  ) %>%
+  select(-data) %>%
+  unnest_longer(channels) %>%
+  unnest_wider(channels, names_sep = "_") %>%
+  rename(
+    channel_name      = channels_name,
+    interaction_count = channels_interaction_count,
+    last_used         = channels_last_used
+  ) %>%
+  mutate(
+    review_date = as.Date(review_date),
+    last_used   = as.Date(last_used),
+    month       = format(review_date, "%Y-%m")
+  )
+
+reviews_channels %>% head(8) %>% kable(caption = "Розгорнуті відгуки з каналами (перші 8 рядків)")
+```
+
+##### 1.3 Фільтрація: рейтинг ≥ 4
+
+```{r}
+#| label: filter-rating
+
+reviews_filtered <- reviews_channels %>%
+  filter(rating >= 4)
+
+cat("Всього записів після розгортання:", nrow(reviews_channels), "\n")
+cat("Записів з рейтингом ≥ 4:", nrow(reviews_filtered), "\n")
+
+reviews_filtered %>%
+  count(month, rating) %>%
+  kable(caption = "Розподіл відгуків (рейтинг ≥ 4) за місяцями")
+```
+
+------------------------------------------------------------------------
+
+#### Етап 2: Перетворення форматів
+
+##### 2.1 Завантаження Excel — аркуші `jan`, `feb`, `mar`
+
+```{r}
+#| label: load-excel
+
+month_labels <- c(jan = "2024-01", feb = "2024-02", mar = "2024-03")
+
+activity_long <- c("jan", "feb", "mar") %>%
+  set_names() %>%
+  map_dfr(
+    ~ read_excel("data/monthly_activity.xlsx", sheet = .x) %>%
+        fill(client_id, .direction = "down") %>%
+        mutate(month = month_labels[.x]),
+    .id = "sheet"
+  ) %>%
+  select(-sheet)
+
+cat("Розмір activity_long:", nrow(activity_long), "рядків x", ncol(activity_long), "стовпців\n")
+
+activity_long %>%
+  count(month) %>%
+  kable(caption = "Кількість записів за місяцем у activity_long")
+```
+
+##### 2.2 Завантаження `client_profiles.csv` через vroom
+
+```{r}
+#| label: load-csv
+
+client_profiles_df <- vroom("data/client_profiles.csv", show_col_types = FALSE)
+
+client_profiles_df %>% head(6) %>% kable(caption = "Профілі клієнтів (перші 6 рядків)")
+```
+
+------------------------------------------------------------------------
+
+#### Етап 3: Об'єднання та віконні операції
+
+##### 3.1 Агрегація відгуків до рівня клієнт–місяць
+
+Перед об'єднанням зводимо `reviews_filtered` до одного рядка на клієнта на місяць:
+
+```{r}
+#| label: aggregate-reviews
+
+reviews_agg <- reviews_filtered %>%
+  group_by(client_id, month) %>%
+  summarise(
+    avg_rating        = round(mean(rating), 2),
+    n_channels        = n_distinct(channel_name),
+    total_interactions = sum(interaction_count),
+    .groups = "drop"
+  )
+
+reviews_agg %>% head(6) %>% kable(caption = "Агреговані відгуки (клієнт × місяць)")
+```
+
+##### 3.2 `left_join`: reviews + activity_long + client_profiles
+
+```{r}
+#| label: join-all
+
+full_data <- activity_long %>%
+  left_join(reviews_agg,      by = c("client_id", "month")) %>%
+  left_join(client_profiles_df, by = "client_id")
+
+cat("Розмір об'єднаного датафрейму:", nrow(full_data), "×", ncol(full_data), "\n")
+
+full_data %>% head(6) %>% kable(caption = "Об'єднаний датафрейм (перші 6 рядків)")
+```
+
+##### 3.3 Середній рейтинг по регіону та місяцю
+
+```{r}
+#| label: avg-rating-region
+
+full_data %>%
+  filter(!is.na(avg_rating)) %>%
+  group_by(region, month) %>%
+  summarise(
+    avg_region_rating = round(mean(avg_rating), 2),
+    n_reviews         = sum(!is.na(avg_rating)),
+    .groups = "drop"
+  ) %>%
+  arrange(month, region) %>%
+  kable(caption = "Середній рейтинг за регіоном і місяцем")
+```
+
+##### 3.4 Віконні операції
+
+**Ранжування** — топ-10% за кількістю взаємодій у своєму регіоні:
+
+```{r}
+#| label: window-rank
+
+full_data <- full_data %>%
+  group_by(region, month) %>%
+  mutate(
+    rank_interactions = dense_rank(desc(coalesce(total_interactions, 0L))),
+    n_in_region       = n(),
+    is_top10_pct      = rank_interactions <= ceiling(n_in_region * 0.1)
+  ) %>%
+  ungroup()
+
+full_data %>%
+  filter(is_top10_pct) %>%
+  select(client_id, region, month, total_interactions, rank_interactions) %>%
+  arrange(region, month) %>%
+  kable(caption = "Клієнти у топ-10% за взаємодіями у своєму регіоні")
+```
+
+**Зсув** — зміна кількості сесій відносно попереднього місяця:
+
+```{r}
+#| label: window-lag
+
+full_data <- full_data %>%
+  arrange(client_id, month) %>%
+  group_by(client_id) %>%
+  mutate(
+    sessions_prev   = lag(total_sessions),
+    sessions_change = total_sessions - lag(total_sessions)
+  ) %>%
+  ungroup()
+
+full_data %>%
+  filter(!is.na(sessions_change)) %>%
+  select(client_id, month, total_sessions, sessions_prev, sessions_change) %>%
+  head(8) %>%
+  kable(caption = "Зміна кількості сесій відносно попереднього місяця (перші 8)")
+```
+
+**Накопичення** — кумулятивна кількість звернень у підтримку:
+
+```{r}
+#| label: window-cumsum
+
+full_data <- full_data %>%
+  arrange(client_id, month) %>%
+  group_by(client_id) %>%
+  mutate(cumulative_tickets = cumsum(support_tickets)) %>%
+  ungroup()
+
+full_data %>%
+  select(client_id, month, support_tickets, cumulative_tickets) %>%
+  filter(client_id %in% head(unique(full_data$client_id), 4)) %>%
+  arrange(client_id, month) %>%
+  kable(caption = "Накопичена кількість звернень у підтримку (4 клієнти)")
+```
+
+------------------------------------------------------------------------
+
+#### Етап 4: Аналіз
+
+##### 4.1 Клієнти з відгуками кожного місяця (`semi_join`)
+
+```{r}
+#| label: semi-join-all-months
+
+reviews_jan <- reviews_agg %>% filter(month == "2024-01")
+reviews_feb <- reviews_agg %>% filter(month == "2024-02")
+reviews_mar <- reviews_agg %>% filter(month == "2024-03")
+
+all_three_months <- reviews_jan %>%
+  semi_join(reviews_feb, by = "client_id") %>%
+  semi_join(reviews_mar, by = "client_id") %>%
+  distinct(client_id) %>%
+  left_join(client_profiles_df %>% select(client_id, region, plan_type),
+            by = "client_id")
+
+cat("Клієнтів з відгуками у кожному місяці:", nrow(all_three_months), "\n")
+
+all_three_months %>%
+  kable(caption = "Клієнти з відгуками у кожному місяці (semi_join × 2)")
+```
+
+##### 4.2 Premium-клієнти без відгуків у березні (`anti_join`)
+
+```{r}
+#| label: anti-join-premium-march
+
+premium_clients <- client_profiles_df %>%
+  filter(plan_type == "Premium")
+
+premium_no_march <- premium_clients %>%
+  anti_join(reviews_mar, by = "client_id") %>%
+  select(client_id, region, plan_type, registration_date)
+
+cat("Premium-клієнтів без відгуків у березні:", nrow(premium_no_march), "\n")
+
+premium_no_march %>%
+  kable(caption = "Premium-клієнти без відгуку у березні (anti_join)")
+```
+
+##### 4.3 Кореляція кількості каналів з рейтингом
+
+```{r}
+#| label: correlation-analysis
+
+corr_data <- reviews_agg %>%
+  filter(!is.na(avg_rating), !is.na(n_channels))
+
+cor_value <- cor(corr_data$n_channels, corr_data$avg_rating, method = "pearson")
+
+corr_data %>%
+  group_by(n_channels) %>%
+  summarise(
+    avg_rating_mean = round(mean(avg_rating), 2),
+    n_obs           = n(),
+    .groups = "drop"
+  ) %>%
+  kable(caption = "Середній рейтинг залежно від кількості каналів взаємодії")
+```
+
+Коефіцієнт кореляції Пірсона між кількістю каналів і рейтингом: **`r round(cor_value, 3)`**.
+
+```{r}
+#| label: corr-interpretation
+
+if (abs(cor_value) < 0.2) {
+  interp <- "кореляція практично відсутня"
+} else if (abs(cor_value) < 0.4) {
+  interp <- "слабка кореляція"
+} else if (abs(cor_value) < 0.6) {
+  interp <- "помірна кореляція"
+} else {
+  interp <- "сильна кореляція"
+}
+
+cat("Інтерпретація: між кількістю каналів взаємодії та рейтингом клієнта —", interp,
+    "(r =", round(cor_value, 3), ")\n")
+```
+
+------------------------------------------------------------------------

@@ -1,0 +1,180 @@
+---
+title: "Лабораторна робота №4: Оптимізація коду в R — від циклів до функціонального програмування"
+subtitle: "Інженерія даних | КрНУ ім. М. Остроградського"
+author: "Барбір Владислав KI-25-1м"
+date: last-modified
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    sidebar: left
+    collapse-level: 2
+    code-fold: true
+    code-overflow: wrap
+    page-layout: full
+    include-in-footer:
+      text: |
+        <hr>
+        <footer style="text-align: center; font-size: 0.9em; color: #666;">
+          <p>Виконав: <strong>Сохін Дмитро</strong> | Група: <strong>KI-25-1м</strong> | Викладач: Сидоренко В.М.</p>
+          <p>Кременчуцький національний університет імені Михайла Остроградського &copy; 2025</p>
+        </footer>
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Мета роботи
+
+Освоїти сучасні підходи до оптимізації коду в R, зокрема: заміну імперативних циклів на функціонали, використання векторизованих операцій та застосування конструкцій обробки помилок (`tryCatch`) для стійкості конвеєрів при роботі з неоднорідними даними.
+
+### Хід роботи
+
+### Аналіз даних про студентів з різних факультетів
+
+У цьому розділі реалізовано надійний, відтворюваний ETL-конвеєр у функціональному стилі для агрегації та аналізу навчальних показників факультетів. Спочатку здійснюється автоматична генерація пакету вхідних Excel-файлів, що містять як валідні дані, так і контрольовані структурні аномалії для перевірки стійкості системи.
+
+```{r}
+library(dplyr)
+library(purrr)
+library(readxl)
+library(writexl)
+library(tibble)
+
+dir.create("data/student_data", recursive = TRUE, showWarnings = FALSE)
+
+faculties <- LETTERS[1:8] # Факультети A, B, C, D, E, F, G, H
+
+for (fac in faculties) {
+  set.seed(match(fac, LETTERS))
+  
+  df_students <- tibble(
+    student_id = 1:5,
+    name = paste("Студент", 1:5, fac),
+    group = paste0("КІ-25-", fac),
+    enrollment_year = 2025
+  )
+  df_grades <- tibble(
+    student_id = 1:5,
+    subject = "Інженерія даних",
+    final_grade = sample(45:98, 5, replace = TRUE)
+  )
+  df_attendance <- tibble(
+    student_id = 1:5,
+    total_classes = 32,
+    attended = sample(12:32, 5, replace = TRUE)
+  )
+  df_projects <- tibble(
+    student_id = 1:5,
+    project_score = sample(50:100, 5, replace = TRUE)
+  )
+  
+  sheets_list <- list(
+    students = df_students, 
+    grades = df_grades, 
+    attendance = df_attendance, 
+    projects = df_projects
+  )
+  
+  if (fac == "H") sheets_list$projects <- NULL
+  
+  write_xlsx(sheets_list, paste0("data/student_data/faculty_", fac, ".xlsx"))
+}
+
+writeLines("This is a corrupted binary simulation", "data/student_data/faculty_corrupted.xlsx")
+
+
+# Етап 1: Безпечне завантаження даних
+safe_load_faculty <- function(path) {
+  tryCatch({
+    sheets <- excel_sheets(path)
+    req_sheets <- c("students", "grades", "attendance", "projects")
+    
+    if (!all(req_sheets %in% sheets)) return(NULL)
+    
+    df_s <- read_excel(path, sheet = "students")
+    df_g <- read_excel(path, sheet = "grades")
+    df_a <- read_excel(path, sheet = "attendance")
+    df_p <- read_excel(path, sheet = "projects")
+    
+    if (!"student_id" %in% colnames(df_s)) return(NULL)
+    
+    df_merged <- df_s %>%
+      left_join(df_g, by = "student_id") %>%
+      left_join(df_a, by = "student_id") %>%
+      left_join(df_p, by = "student_id")
+    
+    df_merged$faculty <- gsub("\\.xlsx$", "", basename(path))
+    
+    return(df_merged)
+  }, error = function(e) {
+    return(NULL)
+  })
+}
+
+file_paths <- list.files("data/student_data", pattern = "\\.xlsx$", full.names = TRUE)
+list_data <- lapply(file_paths, safe_load_faculty)
+all_students <- bind_rows(Filter(Negate(is.null), list_data))
+
+print("Початкові консолідовані дані студентів завантажено")
+print(head(all_students, 5))
+
+
+# Етап 2: Оптимізована обробка даних
+
+all_students <- all_students %>%
+  mutate(
+    attendance_rate = attended / total_classes,
+    overall_score = 0.5 * final_grade + 0.3 * project_score + 0.2 * attendance_rate * 100
+  )
+
+faculty_summary <- all_students %>%
+  group_by(faculty) %>%
+  summarise(
+    avg_overall_score = mean(overall_score, na.rm = TRUE),
+    failing_students = sum(final_grade < 60, na.rm = TRUE),
+    max_project_score = max(project_score, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print("Зведена статистика за факультетами")
+print(faculty_summary)
+
+
+# Етап 3: Аналіз якості даних
+
+total_files_expected <- length(file_paths)
+successful_files <- length(unique(all_students$faculty))
+ignored_files_count <- total_files_expected - successful_files
+
+cat("\nВсього знайдено файлів у папці:", total_files_expected, "\n")
+cat("Успішно імпортовано факультетів:", successful_files, "\n")
+cat("Повністю проігноровано через пошкодження/аномалії сторінок:", ignored_files_count, "\n")
+
+bad_attendance_prop <- mean(all_students$attendance_rate < 0.5, na.rm = TRUE)
+cat("Загальна частка студентів з критичним рівнем відвідуваності (<50%):", 
+    round(bad_attendance_prop * 100, 2), "%\n\n")
+
+
+# Етап 4: порівняння підходів (for vs vapply)
+
+numeric_columns <- all_students %>% select(final_grade, project_score, overall_score)
+
+loop_results <- numeric(ncol(numeric_columns))
+names(loop_results) <- names(numeric_columns)
+for (i in seq_along(numeric_columns)) {
+  loop_results[i] <- mean(numeric_columns[[i]], na.rm = TRUE)
+}
+
+vapply_results <- vapply(numeric_columns, mean, numeric(1), na.rm = TRUE)
+
+print("Порівняння результатів обчислення середніх значень")
+print("Результат циклу for:")
+print(loop_results)
+print("Результат функції vapply:")
+print(vapply_results)
+```

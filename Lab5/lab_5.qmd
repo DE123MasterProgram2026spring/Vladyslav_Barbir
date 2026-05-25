@@ -1,0 +1,306 @@
+---
+title: "Лабораторна робота №5: Функціональне програмування та паралельні обчислення в R"
+subtitle: "Інженерія даних | КрНУ ім. М. Остроградського"
+author: "Барбір Владислав KI-25-1м"
+date: last-modified
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    sidebar: left
+    collapse-level: 2
+    code-fold: true
+    code-overflow: wrap
+    page-layout: full
+    include-in-footer:
+      text: |
+        <hr>
+        <footer style="text-align: center; font-size: 0.9em; color: #666;">
+          <p>Виконав: <strong>Сохін Дмитро</strong> | Група: <strong>KI-25-1м</strong> | Викладач: Сидоренко В.М.</p>
+          <p>Кременчуцький національний університет імені Михайла Остроградського &copy; 2025</p>
+        </footer>
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Мета роботи
+
+Ознайомитися з можливостями функціонального програмування та паралельних обчислень у середовищі R. Навчитися використовувати пакети `purrr`, `foreach`, `furrr` та `future` для побудови масштабованих ETL-конвеєрів обробки даних.
+
+# Вступ
+
+У сучасній інженерії даних важливе значення мають швидкість обробки інформації, стійкість до помилок та можливість масштабування програмних рішень. Для цього використовуються підходи функціонального програмування та багатопоточних обчислень.
+
+У даній лабораторній роботі реалізується ETL-конвеєр для аналізу даних про студентів з різних факультетів на основі Excel-файлів. Обробка виконується за допомогою функціональних підходів та паралельних обчислень.
+
+# Робоче завдання
+
+## Варіант 3
+
+### Тема: Масштабований аналіз даних про студентів з різних факультетів
+
+Було отримано набір Excel-файлів, кожен з яких містить дані про студентів одного факультету (розподілені по аркушах: `students`, `grades`, `attendance`, `projects`). Необхідно побудувати масштабований ETL-конвеєр, який: - безпечно завантажує файли; - об'єднує дані з кількох аркушів; - виконує комплексний аналіз успішності; - використовує паралельні обчислення; - зберігає результати високопродуктивних факультетів у CSV-файли.
+
+```{r}
+library(readxl)
+library(writexl)
+library(dplyr)
+library(purrr)
+library(foreach)
+library(doFuture)
+library(furrr)
+library(future)
+
+# Генерація тестових даних для відтворюваності
+
+dir.create("data/faculties", recursive = TRUE, showWarnings = FALSE)
+dir.create("data/top_faculties", recursive = TRUE, showWarnings = FALSE)
+
+walk(LETTERS[1:12], function(fac) {
+  set.seed(match(fac, LETTERS))
+  df_s <- tibble(student_id = 1:10, name = paste("Студент", 1:10, fac))
+  df_g <- tibble(student_id = 1:10, final_grade = sample(60:100, 10, replace = TRUE))
+  df_a <- tibble(student_id = 1:10, total_classes = 30, attended = sample(15:30, 10, replace = TRUE))
+  df_p <- tibble(student_id = 1:10, project_score = sample(60:100, 10, replace = TRUE))
+  
+  sheets <- list(students = df_s, grades = df_g, attendance = df_a, projects = df_p)
+  if (fac == "L") sheets$projects <- NULL # Аномалія для перевірки tryCatch
+  write_xlsx(sheets, paste0("data/faculties/faculty_", fac, ".xlsx"))
+})
+writeLines("corrupted", "data/faculties/faculty_corrupted.xlsx")
+
+cat("Етап 1. Функціональне завантаження та об’єднання\n\n")
+
+path_data <- "data/faculties"
+
+files <- list.files(
+  path = path_data,
+  pattern = "\\.xlsx$",
+  full.names = TRUE
+)
+
+safe_load_faculty <- function(path) {
+  
+  tryCatch({
+    
+    sheets_in_file <- excel_sheets(path)
+    req_sheets <- c("students", "grades", "attendance", "projects")
+    
+    if (!all(req_sheets %in% sheets_in_file)) {
+      return(NULL)
+    }
+    
+    list_of_dfs <- map(
+      req_sheets,
+      ~ read_excel(path, sheet = .x)
+    )
+    
+    merged_df <- reduce(
+      list_of_dfs,
+      left_join,
+      by = "student_id"
+    ) %>%
+      mutate(
+        faculty_id = gsub("\\.xlsx$", "", basename(path))
+      )
+    
+    return(merged_df)
+    
+  }, error = function(e) {
+    
+    message(
+      paste(
+        "Помилка читання файлу:",
+        basename(path)
+      )
+    )
+    
+    return(NULL)
+  })
+}
+
+faculties_list <- map(
+  files,
+  safe_load_faculty
+)
+
+faculties_list <- compact(
+  faculties_list
+)
+
+high_performing_list <- keep(
+  faculties_list,
+  ~ mean(.x$final_grade, na.rm = TRUE) >= 75
+)
+
+cat("Відфільтровані факультети (середній бал >= 75):\n")
+map_chr(high_performing_list, ~ unique(.x$faculty_id))
+
+
+cat("\n\n Етап 2. Агрегація через reduce()\n\n")
+
+global_students_df <- reduce(
+  high_performing_list,
+  bind_rows
+)
+
+cat("Об'єднана таблиця студентів:\n")
+head(global_students_df)
+
+
+cat("\n\n Етап 3. Паралельний аналіз \n\n")
+
+analyze_faculty <- function(df) {
+  df %>%
+    group_by(faculty_id) %>%
+    summarise(
+      num_students = n(),
+      avg_grade = mean(final_grade, na.rm = TRUE),
+      bad_attendance_prop = mean((attended / total_classes) < 0.7, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+registerDoFuture()
+plan(multisession, workers = 3)
+
+cat("Результат foreach:\n")
+foreach_result <- foreach(
+  fac_data = high_performing_list,
+  .combine = bind_rows,
+  .packages = c("dplyr")
+) %dopar% {
+  analyze_faculty(fac_data)
+}
+print(foreach_result)
+
+cat("\nРезультат furrr (future_map_dfr):\n")
+furrr_result <- future_map_dfr(
+  high_performing_list,
+  analyze_faculty
+)
+print(furrr_result)
+
+
+cat("\n\n Етап 4. Просунута багатопоточність (Вкладені future) \n\n")
+
+plan(
+  list(
+    multisession,
+    multisession
+  )
+)
+
+future_tasks <- map(
+  
+  files,
+  
+  function(file_path) {
+    
+    future({
+      
+      sheets_check <- tryCatch(excel_sheets(file_path), error = function(e) NULL)
+      req_sheets <- c("students", "grades", "attendance", "projects")
+      
+      if (is.null(sheets_check) || !all(req_sheets %in% sheets_check)) {
+        return(NULL)
+      }
+      
+      inner_tasks <- map(
+        
+        req_sheets,
+        
+        function(sht) {
+          future({
+            read_excel(file_path, sheet = sht)
+          })
+        }
+      )
+      
+      values <- map(
+        inner_tasks,
+        value
+      )
+      
+      df_merged <- reduce(values, left_join, by = "student_id")
+      df_merged$faculty_id <- basename(file_path)
+      
+      return(df_merged)
+    })
+  }
+)
+
+resolved_status <- map_lgl(
+  future_tasks,
+  resolved
+)
+
+cat("Статус виконання future (resolved):\n")
+print(resolved_status)
+
+safe_future_results <- map(
+  future_tasks,
+  function(f) {
+    tryCatch({
+      val <- value(f)
+      if(is.null(val)) return(NULL) else return(unique(val$faculty_id))
+    }, error = function(e) {
+      return(NULL)
+    })
+  }
+) %>% compact()
+
+cat("\nУспішно завантажені факультети через вкладені future:\n")
+print(unlist(safe_future_results))
+
+
+cat("\n\n Етап 5. Збереження результатів \n\n")
+
+top_faculties <- keep(
+  high_performing_list,
+  ~ mean(.x$final_grade, na.rm = TRUE) >= 80
+)
+
+cat("Елітні факультети (середній бал >= 80):\n")
+map_chr(top_faculties, ~ unique(.x$faculty_id))
+
+output_names <- map_chr(
+  top_faculties,
+  ~ paste0("data/top_faculties/top_", unique(.x$faculty_id), ".csv")
+)
+
+walk2(
+  top_faculties,
+  output_names,
+  ~ write.csv(
+    .x,
+    .y,
+    row.names = FALSE
+  )
+)
+
+cat("\nCSV-файли елітних факультетів успішно збережені.\n")
+```
+
+# Висновок
+
+У ході виконання лабораторної роботи було реалізовано масштабований ETL-конвеєр для аналізу успішності студентів на різних факультетах. Було використано функціональні підходи та паралельні обчислення за допомогою пакетів purrr, foreach, furrr та future.
+
+Було реалізовано:
+
+- безпечне завантаження Excel-файлів з об'єднанням аркушів;
+
+- агрегацію та фільтрацію даних;
+
+- комплексний аналіз успішності студентів;
+
+- багатопоточну обробку за допомогою вкладених об'єктів future;
+
+- автоматичне збереження високопродуктивних факультетів у форматі CSV.
+
+Отримані результати демонструють ефективність функціонального стилю програмування та паралельних обчислень при роботі з розрізненими файловими даними.

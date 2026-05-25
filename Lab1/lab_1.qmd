@@ -1,0 +1,97 @@
+---
+title: "Лабораторна робота №1: Основи маніпуляції даними з `dplyr`"
+subtitle: "Інженерія даних | КрНУ ім. М. Остроградського"
+author: "Барбір Владислав KI-25-1м"
+date: last-modified
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    sidebar: left
+    collapse-level: 2
+    code-fold: true
+    code-overflow: wrap
+    page-layout: full
+    include-in-footer:
+      text: |
+        <hr>
+        <footer style="text-align: center; font-size: 0.9em; color: #666;">
+          <p>Виконав: <strong>Сохін Дмитро</strong> | Група: <strong>KI-25-1м</strong> | Викладач: Сидоренко В.М.</p>
+          <p>Кременчуцький національний університет імені Михайла Остроградського &copy; 2025</p>
+        </footer>
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+### Мета роботи
+
+Освоїти фундаментальні операції маніпуляції даними в середовищі `R` за допомогою сучасного пакета `dplyr`, використовуючи функціональний підхід та конвеєрне програмування `(%>% або |>)`. Навчитися ефективно фільтрувати, перетворювати, агрегувати та реструктурувати дані для подальшого аналізу чи завантаження в ETL-процеси.
+
+## Робоче завдання
+
+Виконати індивідуальне завдання варіанту 3.
+
+### Хід роботи
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+library(dplyr)
+library(ggplot2)
+```
+
+Відфільтрувати діаманти, у яких якість огранки (cut) — `"Premium"` або `"Ideal"`, а колір (`color`) — від `"D"` до `"F"` (найвища якість). Вибрати лише стовпці: `carat`, `cut`, `color`, `clarity`, `price`. Відсортувати за зростанням ціни (`price`).
+
+```{r}
+diamonds |>
+  filter(cut %in% c("Premium", "Ideal"), color %in% c("D", "E", "F")) |>
+  select(carat, cut, color, clarity, price) |>
+  arrange(price)
+```
+
+Додати стовпець `price_per_carat` (ціна за карат), розрахований за формулою: `price_per_carat = price / carat`. Обрати діаманти, у яких `price_per_carat > 5000`, і відсортувати їх за спаданням `price_per_carat`.
+
+```{r}
+diamonds |>
+  mutate(price_per_carat = price / carat) |>
+  filter(price_per_carat > 5000) |>
+  arrange(desc(price_per_carat))
+```
+
+Для кожної комбінації `cut` (огранка) та `clarity` (чистота), яка представлена більш ніж у 1000 діамантів, розрахувати:
+
+- середню ціну (`mean_price`),
+- медіану ваги (`median_carat`),
+- кількість діамантів (`n`).
+
+Використати `group_by(cut, clarity)`, `summarise()` та `across()` для агрегації числових стовпців.
+
+```{r}
+df_diamonds <- diamonds |>
+  group_by(cut, clarity) |>
+  filter(n() > 1000) |>
+  summarise(n = n(),
+            across(price, mean, .names = "mean_price"),
+            across(carat, median, .names = "median_carat"),
+            .groups = "drop")
+
+df_diamonds
+```
+
+Взяти результат попереднього пункту.
+
+Перейменувати стовпець `cut` на `Якість_огранки`, а `clarity` — на `Чистота`. Перемістити стовпець `n` (`кількість`) між `Якість_огранки` та `Чистота`. Перетворити назви числових стовпців (`mean_price, median_carat`) на формат з префіксом `"Середнє_"` та `"Медіана_"` (наприклад, `Середнє_ціна, Медіана_карат`).
+
+```{r}
+df_diamonds |>
+  rename(Якість_огранки = cut, Чистота = clarity) |>
+  relocate(n, .after = Якість_огранки) |>
+  rename_with(~ case_when(
+    .x == "mean_price" ~ "Середнє_ціна",
+    .x == "median_carat" ~ "Медіана_карат",
+    TRUE ~ .x
+  ))
+```
