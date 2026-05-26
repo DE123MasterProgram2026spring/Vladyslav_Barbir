@@ -1,0 +1,149 @@
+---
+title: "Лабораторна робота №6: Ефективна робота з великими даними за допомогою пакета data.table"
+subtitle: "Інженерія даних | КрНУ ім. М. Остроградського"
+author: "Барбір Владислав KI-25-1м"
+date: last-modified
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    sidebar: left
+    collapse-level: 2
+    code-fold: false
+    code-overflow: wrap
+    page-layout: full
+    include-in-footer:
+      text: |
+        <hr>
+        <footer style="text-align: center; font-size: 0.9em; color: #666;">
+          <p>Виконав: <strong>Сохін Дмитро</strong> | Група: <strong>KI-25-1м</strong> | Викладач: Сидоренко В.М.</p>
+          <p>Кременчуцький національний університет імені Михайла Остроградського &copy; 2025</p>
+        </footer>
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Мета роботи
+
+Освоїти сучасний інструмент для роботи з великими обсягами даних у R — пакет `data.table`. Навчитися виконувати швидкі, пам’ять-ефективні операції над сотнями тисяч і мільйонами рядків: фільтрацію, агрегацію, оновлення (by reference) та злиття таблиць за допомогою унікального синтаксису `DT[i, j, by]`.
+
+# Вступ
+
+У світі інженерії даних часто доводиться працювати з обсягами інформації, які перевантажують оперативну пам’ять. У таких умовах стандартні пакети стають ресурсоємними. `data.table` пропонує оптимізовану C-реалізацію, що дозволяє обробляти дані в десятки разів швидше, мінімізуючи створення проміжних копій у пам'яті.
+
+У даній роботі реалізується високоефективний аналіз логістичної мережі за 2024 рік. Всі операції виконуються виключно синтаксисом `data.table`.
+
+# Хід виконання
+
+# Етап 1: Завантаження даних
+
+На першому етапі завантажимо вихідні дані з робочої директорії. Для роботи з великими обсягами інформації замість стандартних функцій R використаємо оптимізовану функцію fread(). Вона автоматично конвертує дані у формат data.table. Переконаємося у правильності форматів та виведемо перші рядки для ознайомлення.
+
+```{r}
+library(data.table)
+library(ggplot2)
+```
+
+```{r}
+logistics <- fread("logistics_2024.csv")
+warehouses <- fread("warehouses.csv")
+cat("Клас логістичних даних:", class(logistics)[1], "\n")
+cat("Клас довідника складів:", class(warehouses)[1], "\n\n")
+head(logistics, 5)
+```
+
+# Етап 2: Підготовка та очистка даних
+
+На наступному етапі проведемо очистку даних. Спочатку розрахуємо фактичний час доставки у днях як різницю між датою доставки та датою відправлення. Усі модифікації будемо виконувати "на місці" (by reference) за допомогою оператора :=, щоб уникнути зайвого копіювання таблиці в оперативній пам'яті. Також обробимо аномальні (від'ємні) значення і видалимо непотрібний стовпець customer_id.
+
+```{r}
+
+logistics[, delivery_time := as.integer(as.IDate(delivery_date) - as.IDate(dispatch_date))]
+logistics[delivery_time < 0, delivery_time := NA_integer_]
+logistics[, customer_id := NULL]
+str(logistics)
+```
+
+# Етап 3: Агрегація за складами та типами
+
+Далі виконаємо злиття таблиці транзакцій із довідником складів за ключовим полем warehouse_id. Після об'єднання розрахуємо ключові показники ефективності для кожного складу: середній час доставки, загальну кількість доставок та відсоток доставок, що зайняли більше 5 днів.
+
+```{r}
+
+merged_data <- logistics[warehouses, on = "warehouse_id", nomatch = 0]
+
+wh_performance <- merged_data[, .(
+  mean_delivery_time = mean(delivery_time, na.rm = TRUE),
+  total_deliveries = .N,
+  late_prop = mean(delivery_time > 5, na.rm = TRUE)
+), by = warehouse_id]
+
+wh_performance <- wh_performance[order(-mean_delivery_time)]
+
+print(wh_performance)
+```
+
+# Етап 4: Аналіз за місяцями та типами складів
+
+Для дослідження динаміки навантаження на логістичну мережу створимо новий стовпець month. Після цього за допомогою спеціального символу .SD та аргументу .SDcols підрахуємо кількість операцій у розрізі місяців та типів складів.
+
+```{r}
+
+merged_data[, month := format(as.IDate(dispatch_date), "%Y-%m")]
+
+monthly_analysis <- merged_data[, lapply(.SD, length), 
+                                by = .(warehouse_type, month), 
+                                .SDcols = "delivery_id"]
+
+setnames(monthly_analysis, "delivery_id", "delivery_count")
+monthly_analysis <- monthly_analysis[order(month, warehouse_type)]
+
+head(monthly_analysis, 10)
+```
+
+# Етап 5: Виявлення найменш ефективних вузлів
+
+З метою виявлення критичних місць мережі знайдемо склади, які систематично не вкладаються в нормативи. Критеріями неефективності є середній час доставки більше 2.7 днів та суттєве навантаження (понад 1000 доставок). Для інформативності підтягнемо назви міст розташування цих складів.
+
+```{r}
+bad_warehouses <- wh_performance[mean_delivery_time > 2.7 & total_deliveries >= 1000]
+
+worst_hubs <- bad_warehouses[warehouses, on = "warehouse_id", nomatch = NULL][
+  , .(warehouse_id, city, warehouse_type, mean_delivery_time, total_deliveries)
+]
+
+worst_hubs <- head(worst_hubs[order(-mean_delivery_time)], 10)
+
+print(worst_hubs)
+```
+
+# Етап 6: Візуалізація результатів
+
+На завершення роботи побудуємо стовпчасту діаграму, щоб наочно порівняти середній час виконання замовлень між різними складами. Для сумісності з бібліотекою ggplot2 перетворимо таблицю data.table у звичайний формат data.frame.
+
+```{r}
+# Перетворення об'єкта у data.frame
+wh_performance_df <- setDF(copy(wh_performance))
+
+# Візуалізація
+ggplot(wh_performance_df, aes(x = reorder(warehouse_id, mean_delivery_time), y = mean_delivery_time)) +
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +
+  coord_flip() +
+  geom_hline(yintercept = 2.7, linetype = "dashed", color = "red", size = 1) +
+  labs(
+    title = "Аналіз ефективності складів (2024 рік)",
+    subtitle = "Червона пунктирна лінія вказує на норматив доставки у 2.7 дні",
+    x = "Ідентифікатор складу",
+    y = "Середній час доставки (дні)"
+  ) +
+  theme_minimal()
+```
+
+# Висновок
+
+У ході виконання лабораторної роботи було практично освоєно синтаксис пакета data.table. Завдяки використанню оптимізованих функцій злиття, агрегації та оновлення даних "на місці" (by reference), вдалося ефективно обробити масив даних обсягом понад 600 000 рядків. Виконаний аналіз дозволив виявити проблемні вузли в логістичній мережі, що потребують оптимізації процесів доставки.
